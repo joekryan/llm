@@ -445,8 +445,15 @@ class _Shared:
                 }
             )
 
-    def __str__(self):
-        return "OpenAI Chat: {}".format(self.model_id)
+    def set_usage(self, response, usage):
+        if not usage:
+            return
+        input_tokens = usage.pop("prompt_tokens")
+        output_tokens = usage.pop("completion_tokens")
+        usage.pop("total_tokens")
+        response.set_usage(
+            input=input_tokens, output=output_tokens, details=simplify_usage_dict(usage)
+        )
 
     def build_messages(self, prompt, conversation):
         messages = []
@@ -490,15 +497,25 @@ class _Shared:
             messages.append({"role": "user", "content": attachment_message})
         return messages
 
-    def set_usage(self, response, usage):
-        if not usage:
-            return
-        input_tokens = usage.pop("prompt_tokens")
-        output_tokens = usage.pop("completion_tokens")
-        usage.pop("total_tokens")
-        response.set_usage(
-            input=input_tokens, output=output_tokens, details=simplify_usage_dict(usage)
-        )
+    @staticmethod
+    def create_permanent_bundle():
+        SYSTEM_CA_PATH = "/etc/ssl/cert.pem"  # Default macOS system CA path
+        ZSCALER_CERT_PATH = os.path.expanduser("~/zscaler-cert.pem")
+        bundle_path = os.path.expanduser("~/zscaler_combined_bundle.pem")
+        
+        # Only create if it doesn't exist or if Zscaler cert is newer
+        if (not os.path.exists(bundle_path) or 
+                os.path.getmtime(ZSCALER_CERT_PATH) > os.path.getmtime(bundle_path)):
+            # Concatenate system certificates with Zscaler certificate
+            with open(SYSTEM_CA_PATH, 'rb') as system_ca, \
+                 open(ZSCALER_CERT_PATH, 'rb') as zscaler_cert, \
+                 open(bundle_path, 'wb') as bundle:
+                
+                bundle.write(system_ca.read())
+                bundle.write(b'\n')
+                bundle.write(zscaler_cert.read())
+        
+        return bundle_path
 
     def get_client(self, key, *, async_=False):
         kwargs = {}
@@ -518,8 +535,20 @@ class _Shared:
             kwargs["api_key"] = "DUMMY_KEY"
         if self.headers:
             kwargs["default_headers"] = self.headers
-        if os.environ.get("LLM_OPENAI_SHOW_RESPONSES"):
-            kwargs["http_client"] = logging_client()
+        
+        try:
+            # Create a custom httpx client with the certificate bundle
+            cert_bundle = self.create_permanent_bundle()
+            http_client = httpx.Client(
+                verify=cert_bundle,
+                follow_redirects=True
+            )
+            kwargs["http_client"] = http_client
+        except Exception as e:
+            # If there's any error creating the bundle, fall back to default behavior
+            if os.environ.get("LLM_OPENAI_SHOW_RESPONSES"):
+                kwargs["http_client"] = logging_client()
+        
         if async_:
             return openai.AsyncOpenAI(**kwargs)
         else:
